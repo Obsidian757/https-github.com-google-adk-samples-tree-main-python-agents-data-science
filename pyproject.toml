@@ -26,6 +26,7 @@ dependencies = [
     "opentelemetry-sdk>=1.36.0",
     "opentelemetry-exporter-otlp-proto-http>=1.36.0",
     "pg8000>=1.31.2",
+    "duckdb>=1.1.0",
 ]
 
 [dependency-groups]
@@ -45,11 +46,11 @@ ignore = ["C901", "PLR0911", "PLR0912", "PLW0603"]
 
 [tool.ruff.lint.isort]
 # Ensures the data science source is treated as first-party
-known-first-party = ["data_science"]
+known-first-party = ["data_science", "compliance_agent"]
 
 [tool.hatch.build.targets.wheel]
 # Maps the package source correctly for Hatchling
-packages = ["data_science"]
+packages = ["data_science", "compliance_agent"]
 
 [tool.pytest.ini_options]
 console_output_style = "progress"
