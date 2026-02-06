@@ -1,0 +1,82 @@
+{
+  "name": "12th House AI - Budget Alert",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 24 }]
+        }
+      },
+      "id": "daily-trigger",
+      "name": "Daily Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.COMPLIANCE_AGENT_URL }}/api/query",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"sql\": \"SELECT ut.license_id, s.system_name, s.vendor, l.department, ut.credit_consumed, ut.credit_limit, ROUND(ut.credit_consumed / ut.credit_limit * 100, 1) as utilization_pct, ut.flagged_queries, l.total_seats, l.assigned_seats, l.active_seats, (l.assigned_seats - l.active_seats) as reclaimable_seats, ROUND((l.assigned_seats - l.active_seats) * l.cost_per_seat, 2) as reclaimable_cost FROM usage_tracking ut JOIN licenses l ON ut.license_id = l.license_id JOIN ai_systems s ON l.system_id = s.system_id WHERE ut.month = (SELECT MAX(month) FROM usage_tracking) AND (ut.credit_consumed / ut.credit_limit > 0.85 OR ut.flagged_queries > 5 OR (l.assigned_seats - l.active_seats) > l.total_seats * 0.15) ORDER BY utilization_pct DESC\"\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "query-budgets",
+      "name": "Query Budget Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.first()?.json?.rows || [];\n\nif (rows.length === 0) {\n  return [{ json: { has_alerts: false } }];\n}\n\nconst overBudget = rows.filter(r => r.utilization_pct > 85);\nconst flaggedQueries = rows.filter(r => r.flagged_queries > 5);\nconst reclaimable = rows.filter(r => r.reclaimable_seats > 0);\n\nlet alerts = [];\nlet totalSavings = 0;\n\nfor (const r of overBudget) {\n  alerts.push({\n    type: 'OVER_BUDGET',\n    severity: r.utilization_pct > 95 ? 'critical' : 'warning',\n    system: r.system_name,\n    department: r.department,\n    message: `${r.system_name} (${r.department}): ${r.utilization_pct}% of credit limit consumed ($${r.credit_consumed.toLocaleString()} / $${r.credit_limit.toLocaleString()})`\n  });\n}\n\nfor (const r of flaggedQueries) {\n  alerts.push({\n    type: 'FLAGGED_QUERIES',\n    severity: 'warning',\n    system: r.system_name,\n    department: r.department,\n    message: `${r.system_name}: ${r.flagged_queries} flagged queries detected (possible restricted data access)`\n  });\n}\n\nfor (const r of reclaimable) {\n  totalSavings += r.reclaimable_cost;\n  alerts.push({\n    type: 'RECLAIMABLE',\n    severity: 'info',\n    system: r.system_name,\n    department: r.department,\n    message: `${r.system_name}: ${r.reclaimable_seats} unused seats reclaimable (saving $${r.reclaimable_cost.toLocaleString()}/month)`\n  });\n}\n\nconst criticals = alerts.filter(a => a.severity === 'critical');\nconst warnings = alerts.filter(a => a.severity === 'warning');\nconst infos = alerts.filter(a => a.severity === 'info');\n\nlet report = '# Budget & License Governance Alert\\n\\n';\nif (criticals.length) report += '## CRITICAL\\n' + criticals.map(a => `- ${a.message}`).join('\\n') + '\\n\\n';\nif (warnings.length) report += '## WARNING\\n' + warnings.map(a => `- ${a.message}`).join('\\n') + '\\n\\n';\nif (infos.length) report += `## SAVINGS OPPORTUNITY ($${totalSavings.toLocaleString()}/month)\\n` + infos.map(a => `- ${a.message}`).join('\\n') + '\\n\\n';\n\nreturn [{\n  json: {\n    has_alerts: alerts.length > 0,\n    alert_count: alerts.length,\n    critical_count: criticals.length,\n    total_monthly_savings: totalSavings,\n    report: report,\n    alerts: alerts\n  }\n}];"
+      },
+      "id": "analyze-budgets",
+      "name": "Analyze Budget Risks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "has-alerts",
+              "leftValue": "={{ $json.has_alerts }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "check-alerts",
+      "name": "Any Issues?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [950, 300]
+    },
+    {
+      "parameters": {
+        "subject": "=12th House AI - {{ $json.critical_count > 0 ? 'CRITICAL: ' : '' }}Budget Alert ({{ $json.alert_count }} issues, ${{ $json.total_monthly_savings }} reclaimable)",
+        "message": "={{ $json.report }}",
+        "toEmail": "={{ $env.ALERT_EMAIL_TO }}"
+      },
+      "id": "send-alert",
+      "name": "Email Budget Alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1200, 200]
+    }
+  ],
+  "connections": {
+    "Daily Trigger": { "main": [[{ "node": "Query Budget Status", "type": "main", "index": 0 }]] },
+    "Query Budget Status": { "main": [[{ "node": "Analyze Budget Risks", "type": "main", "index": 0 }]] },
+    "Analyze Budget Risks": { "main": [[{ "node": "Any Issues?", "type": "main", "index": 0 }]] },
+    "Any Issues?": { "main": [[{ "node": "Email Budget Alert", "type": "main", "index": 0 }], []] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "12th-house-ai" }, { "name": "budget-alert" }]
+}

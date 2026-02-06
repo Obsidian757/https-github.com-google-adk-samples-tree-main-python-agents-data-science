@@ -1,0 +1,157 @@
+{
+  "name": "12th House AI - License Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 24 }]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Daily Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.openai.com/v1/organization/usage",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "openai-usage",
+      "name": "Get OpenAI Usage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [450, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openai-admin",
+          "name": "OpenAI Admin API Key"
+        }
+      },
+      "notes": "Pulls credit consumption and active user counts from OpenAI Admin API. Configure the API key in n8n credentials."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://graph.microsoft.com/v1.0/subscribedSkus",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "o365-licenses",
+      "name": "Get O365 Licenses",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [450, 400],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "ms-graph",
+          "name": "Microsoft Graph OAuth2"
+        }
+      },
+      "notes": "Pulls license subscription data from Microsoft Graph API. Requires Directory.Read.All permission."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Transform OpenAI usage data for DuckDB insert\nconst openaiData = $('Get OpenAI Usage').item.json;\nconst o365Data = $('Get O365 Licenses').item.json;\n\nconst today = new Date().toISOString().split('T')[0];\nconst monthStart = today.substring(0, 7) + '-01';\n\n// Build usage tracking records\nconst records = [];\n\n// OpenAI ChatGPT usage\nif (openaiData && openaiData.data) {\n  records.push({\n    license_id: 'LIC-001',\n    month: monthStart,\n    active_users: openaiData.data.active_users || 0,\n    total_queries: openaiData.data.total_requests || 0,\n    credit_consumed: openaiData.data.total_cost || 0,\n    credit_limit: 180000,\n    department: 'All Departments',\n    source: 'openai_admin_api'\n  });\n}\n\n// O365/Copilot license counts\nif (o365Data && o365Data.value) {\n  for (const sku of o365Data.value) {\n    if (sku.skuPartNumber && sku.skuPartNumber.includes('COPILOT')) {\n      records.push({\n        license_id: 'LIC-003',\n        total_seats: sku.prepaidUnits?.enabled || 0,\n        assigned_seats: sku.consumedUnits || 0,\n        active_seats: sku.consumedUnits || 0,\n        source: 'ms_graph_api'\n      });\n    }\n  }\n}\n\nreturn records.map(r => ({ json: r }));"
+      },
+      "id": "transform-data",
+      "name": "Transform Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.COMPLIANCE_AGENT_URL }}/api/sync",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "records",
+              "value": "={{ JSON.stringify($json) }}"
+            }
+          ]
+        },
+        "options": { "timeout": 60000 }
+      },
+      "id": "upsert-duckdb",
+      "name": "Upsert to Compliance DB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [950, 300],
+      "notes": "Sends transformed license/usage data to the compliance agent API for DuckDB upsert."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "check-error",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": "200",
+              "operator": { "type": "number", "operation": "notEquals" }
+            }
+          ]
+        }
+      },
+      "id": "check-success",
+      "name": "Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1150, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "log-success",
+              "name": "message",
+              "value": "={{ 'License sync completed: ' + $json.records_updated + ' records updated' }}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "log-success",
+      "name": "Log Success",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1350, 200]
+    },
+    {
+      "parameters": {
+        "subject": "12th House AI - License Sync Failed",
+        "message": "The daily license sync workflow failed. Check n8n logs for details.\n\nError: {{ $json.error }}",
+        "toEmail": "={{ $env.ALERT_EMAIL_TO }}"
+      },
+      "id": "alert-failure",
+      "name": "Alert: Sync Failed",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1350, 400],
+      "notes": "Sends email alert if the sync fails. Configure SMTP in n8n settings."
+    }
+  ],
+  "connections": {
+    "Daily Trigger": { "main": [[{ "node": "Get OpenAI Usage", "type": "main", "index": 0 }, { "node": "Get O365 Licenses", "type": "main", "index": 0 }]] },
+    "Get OpenAI Usage": { "main": [[{ "node": "Transform Data", "type": "main", "index": 0 }]] },
+    "Get O365 Licenses": { "main": [[{ "node": "Transform Data", "type": "main", "index": 0 }]] },
+    "Transform Data": { "main": [[{ "node": "Upsert to Compliance DB", "type": "main", "index": 0 }]] },
+    "Upsert to Compliance DB": { "main": [[{ "node": "Success?", "type": "main", "index": 0 }]] },
+    "Success?": { "main": [[{ "node": "Alert: Sync Failed", "type": "main", "index": 0 }], [{ "node": "Log Success", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "12th-house-ai" }, { "name": "license-sync" }]
+}

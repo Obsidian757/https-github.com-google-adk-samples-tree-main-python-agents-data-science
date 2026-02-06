@@ -1,0 +1,97 @@
+{
+  "name": "12th House AI - Deadline Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "weeks", "weeksInterval": 1 }]
+        }
+      },
+      "id": "weekly-trigger",
+      "name": "Weekly Trigger (Monday 9am)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.COMPLIANCE_AGENT_URL }}/api/query",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"sql\": \"SELECT cf.short_name, cf.name, cf.compliance_deadline, cf.applies_to, ga.system_id, s.system_name, ga.requirement, ga.status, ga.severity, ga.assigned_to, ga.due_date, (cf.compliance_deadline - CURRENT_DATE) as days_remaining FROM compliance_frameworks cf JOIN gap_assessments ga ON cf.framework_id = ga.framework_id JOIN ai_systems s ON ga.system_id = s.system_id WHERE cf.compliance_deadline IS NOT NULL AND cf.compliance_deadline <= CURRENT_DATE + INTERVAL '90 days' AND ga.status != 'compliant' ORDER BY cf.compliance_deadline ASC, CASE ga.severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END\"\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "query-deadlines",
+      "name": "Query Upcoming Deadlines",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = $input.all();\nconst rows = results[0]?.json?.rows || [];\n\nif (rows.length === 0) {\n  return [{ json: { has_alerts: false, message: 'No upcoming deadlines within 90 days.' } }];\n}\n\n// Group by urgency\nconst critical_30 = rows.filter(r => r.days_remaining <= 30);\nconst warning_60 = rows.filter(r => r.days_remaining > 30 && r.days_remaining <= 60);\nconst upcoming_90 = rows.filter(r => r.days_remaining > 60 && r.days_remaining <= 90);\n\nconst formatRow = (r) => `  - [${r.severity.toUpperCase()}] ${r.system_name}: ${r.requirement} (${r.short_name}, due ${r.compliance_deadline}, ${r.days_remaining} days left, owner: ${r.assigned_to})`;\n\nlet report = '# Compliance Deadline Report\\n\\n';\n\nif (critical_30.length > 0) {\n  report += `## CRITICAL: Due within 30 days (${critical_30.length} items)\\n`;\n  report += critical_30.map(formatRow).join('\\n') + '\\n\\n';\n}\n\nif (warning_60.length > 0) {\n  report += `## WARNING: Due within 60 days (${warning_60.length} items)\\n`;\n  report += warning_60.map(formatRow).join('\\n') + '\\n\\n';\n}\n\nif (upcoming_90.length > 0) {\n  report += `## UPCOMING: Due within 90 days (${upcoming_90.length} items)\\n`;\n  report += upcoming_90.map(formatRow).join('\\n') + '\\n\\n';\n}\n\nreturn [{\n  json: {\n    has_alerts: true,\n    total_items: rows.length,\n    critical_count: critical_30.length,\n    warning_count: warning_60.length,\n    report: report\n  }\n}];"
+      },
+      "id": "build-report",
+      "name": "Build Deadline Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "has-alerts",
+              "leftValue": "={{ $json.has_alerts }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "check-alerts",
+      "name": "Any Alerts?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [950, 300]
+    },
+    {
+      "parameters": {
+        "subject": "=12th House AI - {{ $json.critical_count > 0 ? 'CRITICAL: ' : '' }}{{ $json.total_items }} Compliance Deadlines Approaching",
+        "message": "={{ $json.report }}",
+        "toEmail": "={{ $env.ALERT_EMAIL_TO }}"
+      },
+      "id": "send-email",
+      "name": "Email Deadline Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1200, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"{{ $json.critical_count > 0 ? ':rotating_light: ' : ':warning: ' }}Compliance Deadline Alert: {{ $json.total_items }} items due within 90 days ({{ $json.critical_count }} critical)\",\n  \"blocks\": [\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": \"{{ $json.report.replace(/\\n/g, '\\\\n') }}\"\n      }\n    }\n  ]\n}"
+      },
+      "id": "send-slack",
+      "name": "Slack Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 400],
+      "notes": "Optional: Send to Slack. Remove this node if not using Slack."
+    }
+  ],
+  "connections": {
+    "Weekly Trigger (Monday 9am)": { "main": [[{ "node": "Query Upcoming Deadlines", "type": "main", "index": 0 }]] },
+    "Query Upcoming Deadlines": { "main": [[{ "node": "Build Deadline Report", "type": "main", "index": 0 }]] },
+    "Build Deadline Report": { "main": [[{ "node": "Any Alerts?", "type": "main", "index": 0 }]] },
+    "Any Alerts?": { "main": [[{ "node": "Email Deadline Report", "type": "main", "index": 0 }, { "node": "Slack Alert", "type": "main", "index": 0 }], []] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "12th-house-ai" }, { "name": "deadline-monitor" }]
+}

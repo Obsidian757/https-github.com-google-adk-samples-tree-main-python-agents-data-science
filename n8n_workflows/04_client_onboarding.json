@@ -1,0 +1,126 @@
+{
+  "name": "12th House AI - Client Onboarding",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "onboard-client",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Client Form Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "onboard-client",
+      "notes": "Receives POST from landing page contact form. Expected fields: company_name, contact_name, contact_email, phone, contract_size, employee_count, ai_systems (comma-separated), primary_agency, compliance_concerns, timeline"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json.body || $input.first().json;\n\n// Validate required fields\nconst required = ['company_name', 'contact_name', 'contact_email'];\nconst missing = required.filter(f => !input[f]);\n\nif (missing.length > 0) {\n  return [{ json: { valid: false, error: `Missing required fields: ${missing.join(', ')}` } }];\n}\n\n// Sanitize and structure\nconst client = {\n  valid: true,\n  client_id: 'CLIENT-' + Date.now().toString(36).toUpperCase(),\n  company_name: String(input.company_name || '').trim(),\n  contact_name: String(input.contact_name || '').trim(),\n  contact_email: String(input.contact_email || '').trim().toLowerCase(),\n  phone: String(input.phone || '').trim(),\n  contract_size: String(input.contract_size || 'unknown').trim(),\n  employee_count: parseInt(input.employee_count) || 0,\n  ai_systems: String(input.ai_systems || '').split(',').map(s => s.trim()).filter(Boolean),\n  primary_agency: String(input.primary_agency || '').trim(),\n  compliance_concerns: String(input.compliance_concerns || '').trim(),\n  timeline: String(input.timeline || 'standard').trim(),\n  onboarded_at: new Date().toISOString(),\n  status: 'intake'\n};\n\nreturn [{ json: client }];"
+      },
+      "id": "validate-input",
+      "name": "Validate & Structure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "is-valid",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "check-valid",
+      "name": "Valid Input?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.COMPLIANCE_AGENT_URL }}/api/client",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "create-client",
+      "name": "Create Client Record",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [950, 200],
+      "notes": "Creates the client record in the compliance database."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.COMPLIANCE_AGENT_URL }}/api/assess",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"client_id\": \"{{ $('Validate & Structure').item.json.client_id }}\",\n  \"ai_systems\": {{ JSON.stringify($('Validate & Structure').item.json.ai_systems) }},\n  \"primary_agency\": \"{{ $('Validate & Structure').item.json.primary_agency }}\"\n}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "initial-assessment",
+      "name": "Run Initial Assessment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 200],
+      "notes": "Triggers the compliance agent to run an initial gap scan for the new client."
+    },
+    {
+      "parameters": {
+        "subject": "=12th House AI - New Client: {{ $('Validate & Structure').item.json.company_name }}",
+        "message": "=New client onboarded!\n\nClient ID: {{ $('Validate & Structure').item.json.client_id }}\nCompany: {{ $('Validate & Structure').item.json.company_name }}\nContact: {{ $('Validate & Structure').item.json.contact_name }} ({{ $('Validate & Structure').item.json.contact_email }})\nAgency: {{ $('Validate & Structure').item.json.primary_agency }}\nContract Size: {{ $('Validate & Structure').item.json.contract_size }}\nAI Systems: {{ $('Validate & Structure').item.json.ai_systems.join(', ') }}\nConcerns: {{ $('Validate & Structure').item.json.compliance_concerns }}\nTimeline: {{ $('Validate & Structure').item.json.timeline }}\n\nInitial assessment has been triggered automatically.",
+        "toEmail": "={{ $env.ALERT_EMAIL_TO }}"
+      },
+      "id": "notify-team",
+      "name": "Notify 12th House Team",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1450, 200]
+    },
+    {
+      "parameters": {
+        "subject": "=Welcome to 12th House AI - Your Compliance Assessment is Underway",
+        "message": "=Hi {{ $('Validate & Structure').item.json.contact_name }},\n\nThank you for reaching out to 12th House AI. We've received your assessment request and our AI-powered compliance system is already analyzing your setup.\n\nHere's what happens next:\n\n1. Our system is running an initial gap analysis against OMB M-25-21, M-25-22, NIST AI RMF, and relevant agency requirements.\n\n2. You'll receive a preliminary compliance report within 24 hours.\n\n3. We'll schedule a 30-minute review call to walk through the findings and discuss your roadmap.\n\nYour Reference ID: {{ $('Validate & Structure').item.json.client_id }}\n\nIf you have any questions in the meantime, reply to this email.\n\nBest,\nThe 12th House AI Team\n\n--\n12th House AI\nFederal AI Compliance for SMB Contractors\nhttps://12thhouseai.com",
+        "toEmail": "={{ $('Validate & Structure').item.json.contact_email }}"
+      },
+      "id": "welcome-email",
+      "name": "Send Welcome Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1450, 400]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $json.error }) }}",
+        "options": { "responseCode": 400 }
+      },
+      "id": "reject-invalid",
+      "name": "Reject Invalid",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [950, 400]
+    }
+  ],
+  "connections": {
+    "Client Form Webhook": { "main": [[{ "node": "Validate & Structure", "type": "main", "index": 0 }]] },
+    "Validate & Structure": { "main": [[{ "node": "Valid Input?", "type": "main", "index": 0 }]] },
+    "Valid Input?": { "main": [[{ "node": "Create Client Record", "type": "main", "index": 0 }], [{ "node": "Reject Invalid", "type": "main", "index": 0 }]] },
+    "Create Client Record": { "main": [[{ "node": "Run Initial Assessment", "type": "main", "index": 0 }]] },
+    "Run Initial Assessment": { "main": [[{ "node": "Notify 12th House Team", "type": "main", "index": 0 }, { "node": "Send Welcome Email", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "12th-house-ai" }, { "name": "client-onboarding" }]
+}

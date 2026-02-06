@@ -1,0 +1,92 @@
+{
+  "name": "12th House AI - Monthly Compliance Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "months", "monthsInterval": 1 }]
+        }
+      },
+      "id": "monthly-trigger",
+      "name": "Monthly Trigger (1st of month)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "generate-report",
+        "options": {}
+      },
+      "id": "manual-trigger",
+      "name": "Manual Report Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 500],
+      "webhookId": "generate-report",
+      "notes": "POST /webhook/generate-report to trigger report generation on demand."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.COMPLIANCE_AGENT_URL }}/api/query",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"sql\": \"SELECT s.system_id, s.system_name, s.vendor, s.agency, s.data_classification, s.hipaa_relevant, COUNT(ga.assessment_id) as total_assessments, SUM(CASE WHEN ga.status = 'compliant' THEN 1 ELSE 0 END) as compliant_count, SUM(CASE WHEN ga.status = 'gap' THEN 1 ELSE 0 END) as gap_count, SUM(CASE WHEN ga.status = 'partial' THEN 1 ELSE 0 END) as partial_count, SUM(CASE WHEN ga.severity = 'critical' AND ga.status != 'compliant' THEN 1 ELSE 0 END) as critical_gaps, SUM(ga.estimated_effort_days) as total_effort_days FROM ai_systems s LEFT JOIN gap_assessments ga ON s.system_id = ga.system_id WHERE s.status = 'active' GROUP BY s.system_id, s.system_name, s.vendor, s.agency, s.data_classification, s.hipaa_relevant ORDER BY critical_gaps DESC\"\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "query-compliance",
+      "name": "Query Compliance Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.COMPLIANCE_AGENT_URL }}/api/query",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"sql\": \"SELECT l.license_id, s.system_name, l.total_seats, l.assigned_seats, l.active_seats, (l.assigned_seats - l.active_seats) as unused_seats, l.cost_per_seat, ROUND((l.assigned_seats - l.active_seats) * l.cost_per_seat, 2) as monthly_waste, l.hipaa_tier, l.o365_restricted, ut.credit_consumed, ut.credit_limit, ROUND(ut.credit_consumed / ut.credit_limit * 100, 1) as utilization_pct FROM licenses l JOIN ai_systems s ON l.system_id = s.system_id LEFT JOIN usage_tracking ut ON l.license_id = ut.license_id AND ut.month = (SELECT MAX(month) FROM usage_tracking) ORDER BY monthly_waste DESC\"\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "query-licenses",
+      "name": "Query License Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "const compliance = $('Query Compliance Status').first()?.json?.rows || [];\nconst licenses = $('Query License Status').first()?.json?.rows || [];\n\nconst today = new Date().toISOString().split('T')[0];\nconst monthName = new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' });\n\n// Compliance summary\nconst totalSystems = compliance.length;\nconst criticalSystems = compliance.filter(s => s.critical_gaps > 0).length;\nconst hipaaSystems = compliance.filter(s => s.hipaa_relevant).length;\nconst totalGaps = compliance.reduce((sum, s) => sum + (s.gap_count || 0), 0);\nconst totalPartial = compliance.reduce((sum, s) => sum + (s.partial_count || 0), 0);\nconst totalCompliant = compliance.reduce((sum, s) => sum + (s.compliant_count || 0), 0);\nconst totalEffort = compliance.reduce((sum, s) => sum + (s.total_effort_days || 0), 0);\n\n// License summary\nconst totalSeats = licenses.reduce((sum, l) => sum + (l.total_seats || 0), 0);\nconst totalUnused = licenses.reduce((sum, l) => sum + (l.unused_seats || 0), 0);\nconst totalWaste = licenses.reduce((sum, l) => sum + (l.monthly_waste || 0), 0);\nconst overBudget = licenses.filter(l => l.utilization_pct > 85).length;\n\nlet report = `# 12th House AI — Monthly Compliance Report\\n`;\nreport += `## ${monthName}\\n\\n`;\nreport += `---\\n\\n`;\n\nreport += `## Executive Summary\\n\\n`;\nreport += `| Metric | Value |\\n|--------|-------|\\n`;\nreport += `| Active AI Systems | ${totalSystems} |\\n`;\nreport += `| Systems with Critical Gaps | ${criticalSystems} |\\n`;\nreport += `| HIPAA-Relevant Systems | ${hipaaSystems} |\\n`;\nreport += `| Open Gaps | ${totalGaps} |\\n`;\nreport += `| Partial Compliance | ${totalPartial} |\\n`;\nreport += `| Fully Compliant Items | ${totalCompliant} |\\n`;\nreport += `| Total Remediation Effort | ${totalEffort} days |\\n`;\nreport += `| Total License Seats | ${totalSeats.toLocaleString()} |\\n`;\nreport += `| Unused/Reclaimable Seats | ${totalUnused.toLocaleString()} |\\n`;\nreport += `| Monthly License Waste | $${totalWaste.toLocaleString()} |\\n`;\nreport += `| Systems Over 85% Budget | ${overBudget} |\\n\\n`;\n\nreport += `## System-by-System Compliance Status\\n\\n`;\nfor (const sys of compliance) {\n  const status = sys.critical_gaps > 0 ? 'CRITICAL' : sys.gap_count > 0 ? 'GAPS' : 'COMPLIANT';\n  const hipaa = sys.hipaa_relevant ? ' [HIPAA]' : '';\n  report += `### ${sys.system_name} (${sys.vendor})${hipaa}\\n`;\n  report += `- Agency: ${sys.agency} | Classification: ${sys.data_classification}\\n`;\n  report += `- Status: **${status}** — ${sys.compliant_count} compliant, ${sys.partial_count} partial, ${sys.gap_count} gaps (${sys.critical_gaps} critical)\\n`;\n  report += `- Remediation effort: ${sys.total_effort_days} days\\n\\n`;\n}\n\nreport += `## License Governance\\n\\n`;\nfor (const lic of licenses) {\n  const flag = lic.utilization_pct > 85 ? ' ⚠️ OVER BUDGET' : '';\n  report += `- **${lic.system_name}**: ${lic.active_seats}/${lic.total_seats} active, ${lic.unused_seats} reclaimable ($${lic.monthly_waste}/mo)${flag}\\n`;\n}\n\nreport += `\\n---\\n`;\nreport += `*Generated by 12th House AI Compliance Agent on ${today}*\\n`;\n\nreturn [{\n  json: {\n    report: report,\n    subject: `12th House AI — ${monthName} Compliance Report (${criticalSystems} critical, $${totalWaste.toLocaleString()} reclaimable)`,\n    critical_systems: criticalSystems,\n    total_waste: totalWaste\n  }\n}];"
+      },
+      "id": "build-report",
+      "name": "Build Monthly Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [800, 400]
+    },
+    {
+      "parameters": {
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.report }}",
+        "toEmail": "={{ $env.ALERT_EMAIL_TO }}"
+      },
+      "id": "send-report",
+      "name": "Email Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1100, 400]
+    }
+  ],
+  "connections": {
+    "Monthly Trigger (1st of month)": { "main": [[{ "node": "Query Compliance Status", "type": "main", "index": 0 }, { "node": "Query License Status", "type": "main", "index": 0 }]] },
+    "Manual Report Trigger": { "main": [[{ "node": "Query Compliance Status", "type": "main", "index": 0 }, { "node": "Query License Status", "type": "main", "index": 0 }]] },
+    "Query Compliance Status": { "main": [[{ "node": "Build Monthly Report", "type": "main", "index": 0 }]] },
+    "Query License Status": { "main": [[{ "node": "Build Monthly Report", "type": "main", "index": 0 }]] },
+    "Build Monthly Report": { "main": [[{ "node": "Email Report", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "12th-house-ai" }, { "name": "monthly-report" }]
+}

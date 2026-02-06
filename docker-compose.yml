@@ -1,0 +1,95 @@
+version: "3.8"
+
+# ============================================================================
+# 12th House AI — Full Stack
+# n8n (automation) + Compliance Agent API + Nginx (landing page)
+#
+# Deploy: docker compose up -d
+# n8n UI: http://your-ip:5678
+# Agent API: http://your-ip:8080
+# Landing page: http://your-ip (port 80)
+# ============================================================================
+
+services:
+
+  # -- n8n: Workflow Automation -----------------------------------------------
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: 12thhouse-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://${VPS_IP:-76.13.98.156}:5678/
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD:-changeme}
+      - GENERIC_TIMEZONE=America/New_York
+      # API keys for workflows
+      - OPENAI_ADMIN_API_KEY=${OPENAI_ADMIN_API_KEY:-}
+      - MICROSOFT_GRAPH_CLIENT_ID=${MICROSOFT_GRAPH_CLIENT_ID:-}
+      - MICROSOFT_GRAPH_CLIENT_SECRET=${MICROSOFT_GRAPH_CLIENT_SECRET:-}
+      - MICROSOFT_GRAPH_TENANT_ID=${MICROSOFT_GRAPH_TENANT_ID:-}
+      - COMPLIANCE_AGENT_URL=http://compliance-agent:8080
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - ALERT_EMAIL_TO=${ALERT_EMAIL_TO:-}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n_workflows:/home/node/workflows:ro
+    networks:
+      - 12thhouse
+
+  # -- Compliance Agent API ---------------------------------------------------
+  compliance-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.compliance
+    container_name: 12thhouse-agent
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - COMPLIANCE_DB_PATH=/app/data/compliance.duckdb
+      - COMPLIANCE_AGENT_MODEL=${COMPLIANCE_AGENT_MODEL:-gemini-2.5-flash}
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-}
+      - GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION:-us-central1}
+      - GOOGLE_GENAI_USE_VERTEXAI=${GOOGLE_GENAI_USE_VERTEXAI:-0}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+    volumes:
+      - compliance_data:/app/data
+    networks:
+      - 12thhouse
+
+  # -- Nginx: Landing Page + Reverse Proxy ------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: 12thhouse-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./landing_page:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - certbot_certs:/etc/letsencrypt:ro
+    depends_on:
+      - n8n
+      - compliance-agent
+    networks:
+      - 12thhouse
+
+volumes:
+  n8n_data:
+  compliance_data:
+  certbot_certs:
+
+networks:
+  12thhouse:
+    driver: bridge
